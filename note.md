@@ -1,17 +1,21 @@
 6.824笔记
 按照课程要求，这里就不公开代码了。
-放一篇实验笔记记录一下lab中的一些关键点和踩过的坑嘿嘿。
+放一篇实验笔记记录一下lab中的一些关键点和踩过的坑^^。
+补充了一份pdf，上面有当时的实现思路。
 
 Lab2A
-刚开始只要接收AE直接重置timerReset，导致出现超时，no leader。
+    这个lab要我们实现最基础的选举RequestVote和心跳（不包含日志的AE）机制。
+节点只要接收到有效的RPC调用，就要重置timer，无效的消息直接无视，否则会出现超时no leader。
 需要提几点，RPC过程中不能加锁，否则会可能出现死锁现象；无论是leader还是follower每次接收到消息，都需要优先对消息的Term作判断，防止由于网络延迟等问题，导致过期的消息产生不良影响，或者过期leader没有及时发现自己过期，错误写入。
+每当收到更高term的响应（当然也是有效的RPC），也要重置timer，别忘了升term的同时把voteFor置为-1。
 
 Term升高得太快：
 sendAE刚开始用设计用sync.WaitGroup实现：发送AE前add(1)，接收到返回done()，每组AE发送直接通过wait()做同步，从而达到每一轮的AE都完成后再开始下一轮AE。但是会遇到一种情况，就是某些机器可能在接收到RPC途中会宕机或网络出现异常，不会返回reply，导致很长时间无法发送下一轮的AE，从而触发follower超时，升term。这个bug很长一段时间没有发现，直到开始做2B的时候才发现。
 所以正确的做法应该是由pingLoop()去控制发送AE的频率。
 
 Lab2B
-在刚开始读Raft论文的时候没有正确理解应用到状态机是什么意思，以为是需要在Raft库中重新设计一个状态机的数据结构。最后发现实际上应用过程就是更新commitIndex，并向k-v库更新已经同步完成的数据，状态机我的理解是k-v数据库的抽象概念。
+    这个lab要我们实现日志复制机制。
+在刚开始读Raft论文的时候没有正确理解应用到状态机是什么意思，以为是需要在Raft库中重新设计一个状态机的数据结构。最后发现实际上应用过程就是更新commitIndex。commitIndex表示可以应用进状态机的数据，lastApplied表示实际已经应用到k-v库（论文中的状态机）的数据，状态机我的理解是k-v数据库的抽象概念。
 因此我们大致梳理一下日志同步的流程：
 1.首先集群的leader收到来自client的command interface{}，即新log entry
 2.然后leader会直接把该entry直接追加到本地日志中
@@ -19,14 +23,19 @@ Lab2B
 4.当有过半follower追加成功后，leader便提交日志到状态机中（由apply线程完成）
 
 因此在这个实验中我们不需要改动RequestVote()（前提是这个部分的实现没有bug），通过实现在AE中附带日志项，使得集群能得到完全一致的日志状态。
-根据论文描述，我们可以通过新的变量matchIndex[], nextIndex[], prevLogIndex[]以及prevLogTerm[]来完成日志同步。前两个变量作用于leader，matchIndex记录leader和每一个follower当前匹配到的日志项的索引值，nextIndex记录leader准备要发送给每一个follower的日志项的索引值。prevLogIndex和prevLogTerm作用于leader向follower发送AE时，试探当前的follower日志与leader日志的同步位置。
-当candidate成为leader后，matchIndex会初始化为0，而nextIndex会初始化为len(logs)。prevLogIndex和prevLogTerm取nextIndex[i]-1的日志项信息。
+根据论文描述，我们可以通过新的变量matchIndex[], nextIndex[], prevLogIndex[]以及prevLogTerm[]来完成日志同步。前两个变量作用于leader，matchIndex记录leader和每一个follower当前匹配到的日志项的索引值，nextIndex记录leader准备要发送给每一个follower的日志项的索引值。prevLogIndex和prevLogTerm作用于leader向follower发送AE时，试探当前的follower日志与leader日志的同步位置，发现不同步则需要清除不同步的日志。
+当candidate成为leader后，matchIndex会初始化为0，而nextIndex会初始化为len(logs)。
+
+
+为什么要把matchIndex初始化为0而不是len(logs)？
+我的理解是，当重新发生了选主，意味着集群出现异常，重置为0可以确保follower所有的不一致或者缺失的日志都可以被修复。prevLogIndex和prevLogTerm取nextIndex[i]-1的日志项信息，如果与follower的日志不一致则向前回滚。
 当follower接收到日志不匹配是由两种情况引起的，第一种是由于follower还有很多条日志没有接收到，没有出现和leader日志冲突的现象；第二种是由于leader出现宕机等意外，导致follower和当前最新leader在同一个logIndex下游不同日志，这种情况需要follower清除掉有冲突的日志项。
 为了提高同步效率，在这个实现中，leader发送的每一个AE包含多个entries，而不是每次只发送nextIndex这一条entry。
 
 这里再记录一下我在实现中遇到的两个问题。
 第一个问题是，性能问题。当leader发现follower没有匹配发送的日志项，需要向前试探。如果我们每次只试探前一条，会无法通过测试TestCount2B，因此需要加快匹配的速度。这里我采用了木鸟大佬的解决方法，每次试探错误就往前跳过一个term，成功通过测试。
 第二个问题是，日志项索引的问题。论文要求的第一个index是1，但是我的实现中第一个index是0，刚开始没发现这个问题，导致测试脚本一直报日志项不匹配错误。我这里的补救措施是在启动服务器时先写一条空日志，用于填充index=0的位置。
+
 
 Lab2C
 这个lab要求我们完成persist()和readPersist()两个函数，并且在合理的位置调用它们，实现持久化。
