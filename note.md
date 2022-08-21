@@ -155,17 +155,18 @@ isOpCorrect(command, op)这里是一个优化点。上述方案通过对比相�
 最后一个难点是如何在接收到configuration改动日志后实现动态分片数据迁移。为了简便，我这里所有的对RG的操作命令都会以写入到Raft日志，应用状态机的方式，保证RG中所有实例的操作的线性一致性。生成快照，应用新Config，拉取新的Shard data会和Put/Get操作一样写入Raft日志中。快照和持久化的实现基本与Lab3一致。这里着重讲讲分片数据迁移。
 
 - 分片数据迁移的数据结构：
-shards map[int]void                                 
-// 当前正在提供服务的分片集合
 
-outShardsKv map[int]map[int]map[string]string       
-// configNum-(shard-(key,value)), 存有不再负责的分片数据，例如config2不再负责的分片4数据存储在outShardKv[1][4]中
+1. shards map[int]void                                 
+   // 当前正在提供服务的分片集合
 
-missingShardsKv map[int]int                         
-// 存储当前缺少的shard，当missingShardKv不为空，表示当前config还有数据需要从其他集群中拉取, shard-configNum
+2. outShardsKv map[int]map[int]map[string]string       
+   // configNum-(shard-(key,value)), 存有不再负责的分片数据，例如config2不再负责的分片4数据存储在outShardKv[1][4]中
 
-kvDBs map[int]map[string]string                     
-// k: shard, v:(map <k, v>)
+3. missingShardsKv map[int]int                         
+   // 存储当前缺少的shard，当missingShardKv不为空，表示当前config还有数据需要从其他集群中拉取, shard-configNum
+
+4. kvDBs map[int]map[string]string                     
+   // k: shard, v:(map <k, v>)
 
 Kv-server会通过updateConfigLoop拉取新的Config，一旦有新Config就写入Raft，更新shard-info，更新shard-info的主要目的是把不再属于这个RG的shard存入outShardsKv，把缺失的shard存入missingShardsKv。
 
